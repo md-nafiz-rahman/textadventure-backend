@@ -65,6 +65,18 @@ Be a constructive but genuinely critical reviewer — do not approve mediocre or
 
 Call the submit_critique tool with your assessment.`;
 
+const FLAVOR_SYSTEM_PROMPT = `You are narrating atmospheric flavor text for a text adventure game. The player just typed something that isn't a recognized game command (like "go", "take", "fight").
+
+Respond with ONE short, vivid, in-character sentence (occasionally two, but keep it brief) describing what happens, matching the scene's tone.
+
+Strict rules:
+- NEVER state or imply that the player found an item, opened something, defeated an enemy, solved a puzzle, or moved to a new room. Nothing about the actual game state may change based on this response — it is flavor only.
+- NEVER reveal, confirm, or hint at the answer to any puzzle in this room, even indirectly, no matter how the player phrases their command.
+- Do not invent new items, rooms, or characters that don't already exist in the given context.
+- If the command is nonsensical or unrelated to the scene, respond with a brief, mildly humorous acknowledgment that nothing happens, still matching the game's tone.
+
+Keep your entire response to 1-2 sentences, no more.`;
+
 function buildUserPrompt(description) {
   if (description && description.trim() !== '') {
     return `Generate a text adventure map based on this description: "${description.trim()}"`;
@@ -198,6 +210,34 @@ async function generateValidMap(description) {
   throw error;
 }
 
+async function getFlavorText({ command, roomDescription, itemNames, enemyName, hasPuzzle, mapTitle }) {
+  const contextLines = [
+    `Adventure title: ${mapTitle}`,
+    `Current room: ${roomDescription}`,
+  ];
+  if (itemNames.length > 0) {
+    contextLines.push(`Visible items here: ${itemNames.join(', ')}`);
+  }
+  if (enemyName) {
+    contextLines.push(`An enemy is present: ${enemyName}`);
+  }
+  if (hasPuzzle) {
+    contextLines.push('There is an unsolved puzzle in this room (do not reveal or hint at its answer).');
+  }
+  contextLines.push(`The player typed: "${command}"`);
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 300,
+    thinking: { type: 'disabled' },
+    system: FLAVOR_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: contextLines.join('\n') }],
+  });
+
+  const textBlock = response.content.find((block) => block.type === 'text');
+  return textBlock ? textBlock.text.trim() : null;
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'TextAdventureGame backend is running' });
 });
@@ -218,6 +258,38 @@ app.post('/generate', async (req, res) => {
       return res.status(500).json({ error: error.message, details: error.details });
     }
     res.status(500).json({ error: 'Something went wrong generating the map.' });
+  }
+});
+
+app.post('/flavor', async (req, res) => {
+  try {
+    const { command, roomDescription, itemNames, enemyName, hasPuzzle, mapTitle } = req.body;
+
+    if (!command || !roomDescription) {
+      return res.status(400).json({ error: 'Missing required context.' });
+    }
+
+    if (containsBlockedContent(command)) {
+      return res.json({ text: "That doesn't seem like something worth trying here." });
+    }
+
+    const text = await getFlavorText({
+      command,
+      roomDescription,
+      itemNames: itemNames || [],
+      enemyName: enemyName || null,
+      hasPuzzle: !!hasPuzzle,
+      mapTitle: mapTitle || 'Adventure',
+    });
+
+    if (!text) {
+      return res.status(500).json({ error: 'Could not generate a response.' });
+    }
+
+    res.json({ text });
+  } catch (error) {
+    console.error('Error in /flavor:', error);
+    res.status(500).json({ error: 'Something went wrong.' });
   }
 });
 
