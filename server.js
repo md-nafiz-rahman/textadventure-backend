@@ -56,12 +56,15 @@ Call the generate_map tool with the complete structure.`;
 const ANSWER_CHECK_SYSTEM_PROMPT = `You are checking whether a player's guess for a riddle is a genuine, correct answer — not a coincidental similarity.
 
 You will be given the riddle's official answer and the player's guess. Respond with whether the guess should be accepted, considering:
-- Exact synonyms (e.g. official answer "book", guess "novel" is NOT the same thing and should be rejected — but "book" vs "a book" should be accepted)
-- Minor spelling mistakes or typos
-- The same concept phrased differently (e.g. "flashlight" vs "torch" if genuinely interchangeable)
-- Singular/plural differences, articles ("a", "the"), or filler words
+- A genuinely different, correctly-spelled word or short phrase for the exact same specific concept (e.g. official answer "flashlight", guess "torch")
+- Singular/plural differences, articles ("a", "the"), or filler words (e.g. "book" vs "a book")
 
-Be STRICT, not generous. If there is real doubt about whether the guess means the same specific thing as the official answer, reject it. A wrong guess that happens to be topically related must still be rejected.
+You must REJECT the guess if:
+- It is a misspelling or typo of the official answer itself (e.g. official answer "keyboard", guess "keybord" or "keyboad") — the player must spell the actual correct word correctly. A near-miss spelling of the right word is still wrong, not correct.
+- It only means something topically related, not the same specific thing (e.g. official answer "book", guess "novel")
+- There is genuine doubt about whether it means the same specific thing
+
+Be STRICT, not generous. Only accept a guess if it is a real, different, correctly-spelled word or phrase with the exact same meaning as the official answer — never accept a misspelling of the answer itself.
 
 Call the submit_answer_check tool with your decision.`;
 
