@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const AnthropicModule = require('@anthropic-ai/sdk');
 const Anthropic = typeof AnthropicModule === 'function' ? AnthropicModule : AnthropicModule.default;
@@ -25,6 +26,7 @@ function containsBlockedContent(text) {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -101,6 +103,38 @@ function buildUserPrompt(description) {
 
 const MAX_ATTEMPTS = 5;
 
+// ---- In-memory job store for background generation with live progress ----
+const jobs = new Map();
+const JOB_TTL_MS = 15 * 60 * 1000;
+
+function createJob() {
+  const jobId = crypto.randomUUID();
+  jobs.set(jobId, {
+    status: 'Starting generation...',
+    done: false,
+    map: null,
+    error: null,
+    createdAt: Date.now(),
+  });
+  return jobId;
+}
+
+function updateJob(jobId, updates) {
+  const job = jobs.get(jobId);
+  if (job) {
+    jobs.set(jobId, { ...job, ...updates });
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [jobId, job] of jobs.entries()) {
+    if (now - job.createdAt > JOB_TTL_MS) {
+      jobs.delete(jobId);
+    }
+  }
+}, 5 * 60 * 1000);
+
 async function critiqueMap(map, description) {
   const requestContext = description && description.trim() !== ''
     ? `The player requested: "${description.trim()}"`
@@ -140,13 +174,19 @@ Feedback: ${feedback}
 Be precise: if the feedback names a specific exit, item, or field that needs to change, change exactly that and nothing else. Keep the map fully structurally valid (every room reachable, every lock has a real way to open it, every referenced item actually placed in the map).`;
 }
 
-async function generateValidMap(description) {
+async function generateValidMap(description, onProgress = () => {}) {
   const messages = [{ role: 'user', content: buildUserPrompt(description) }];
   let lastErrors = [];
   let lastValidCandidate = null;
   let critiqueRejectionCount = 0;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    onProgress(
+      attempt === 1
+        ? 'Designing rooms and puzzles...'
+        : `Revising the world (attempt ${attempt} of ${MAX_ATTEMPTS})...`
+    );
+
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-5',
       max_tokens: 20000,
@@ -162,12 +202,16 @@ async function generateValidMap(description) {
     }
 
     const candidate = toolUseBlock.input;
+
+    onProgress('Checking the world is solvable...');
     const { valid, errors } = validateMap(candidate);
 
     if (!valid) {
       console.log(`Attempt ${attempt} failed structural validation:`, errors);
       console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
       lastErrors = errors;
+
+      onProgress('Found a structural issue, fixing it...');
 
       messages.push({ role: 'assistant', content: response.content });
       messages.push({
@@ -185,17 +229,21 @@ async function generateValidMap(description) {
     }
 
     lastValidCandidate = candidate;
+    onProgress('Reviewing puzzle design and pacing...');
     console.log(`Attempt ${attempt} passed structural validation. Requesting creative critique...`);
 
     const critique = await critiqueMap(candidate, description);
     console.log(`Attempt ${attempt} critique:`, critique);
 
     if (critique.approved) {
+      onProgress('Finalizing your adventure...');
       return candidate;
     }
 
     critiqueRejectionCount += 1;
     lastErrors = [`Creative feedback: ${critique.feedback}`];
+
+    onProgress('Incorporating design feedback...');
 
     if (critiqueRejectionCount >= 2) {
       console.log(`Attempt ${attempt}: same creative issue persisting (rejection #${critiqueRejectionCount}), escalating to a more directive correction instruction.`);
@@ -281,23 +329,37 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'TextAdventureGame backend is running' });
 });
 
-app.post('/generate', async (req, res) => {
-  try {
-    const { description } = req.body;
+app.post('/generate/start', (req, res) => {
+  const { description } = req.body;
 
-    if (containsBlockedContent(description)) {
-      return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });
-    }
-
-    const generatedMap = await generateValidMap(description);
-    res.json({ map: generatedMap });
-  } catch (error) {
-    console.error('Error in /generate:', error);
-    if (error.details) {
-      return res.status(500).json({ error: error.message, details: error.details });
-    }
-    res.status(500).json({ error: 'Something went wrong generating the map.' });
+  if (containsBlockedContent(description)) {
+    return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });
   }
+
+  const jobId = createJob();
+  res.json({ jobId });
+
+  generateValidMap(description, (status) => {
+    updateJob(jobId, { status });
+  })
+    .then((map) => {
+      updateJob(jobId, { done: true, map, status: 'Done!' });
+    })
+    .catch((error) => {
+      console.error('Error in /generate/start:', error);
+      updateJob(jobId, {
+        done: true,
+        error: 'Could not generate a valid map after multiple attempts.',
+      });
+    });
+});
+
+app.get('/generate/status/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found.' });
+  }
+  res.json(job);
 });
 
 app.post('/flavor', async (req, res) => {
