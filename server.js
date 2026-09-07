@@ -30,6 +30,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `Keep all content strictly family-friendly. Never generate sexual, explicit, or adult content of any kind. If the user's description implies anything inappropriate, ignore that part entirely and invent a wholesome, unrelated theme instead.
 
+IMPORTANT: Generate the title, startRoomId, and objective fields FIRST, before writing out the detailed rooms array. These identifying fields must never be lost, even in a long, detailed generation.
+
 You are a game designer generating maps for a text adventure game. The engine supports:
 
 - Rooms connected by exits in named directions (e.g. "north", "up", "hidden door" — any descriptive word works)
@@ -67,7 +69,7 @@ async function generateMapAttempt(description, previousErrors) {
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-5',
-    max_tokens: 6000,
+    max_tokens: 20000,
     system: SYSTEM_PROMPT,
     tools: [mapToolSchema],
     tool_choice: { type: 'tool', name: 'generate_map' },
@@ -93,7 +95,7 @@ app.post('/generate', async (req, res) => {
     if (containsBlockedContent(description)) {
         return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });    }
 
-    const MAX_ATTEMPTS = 3;
+    const MAX_ATTEMPTS = 5;
     let lastErrors = [];
     let generatedMap = null;
 
@@ -105,9 +107,9 @@ app.post('/generate', async (req, res) => {
         generatedMap = candidate;
         break;
       }
-
       console.log(`Attempt ${attempt} failed validation:`, errors);
-      lastErrors = errors;
+      console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
+        lastErrors = errors;
     }
 
     if (!generatedMap) {
@@ -124,4 +126,5 @@ app.post('/generate', async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+
 });
