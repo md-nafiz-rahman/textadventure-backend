@@ -100,4 +100,23 @@ const mapToolSchema = {
   },
 };
 
-module.exports = { mapToolSchema };
+const critiqueToolSchema = {
+  name: 'submit_critique',
+  description: 'Submit a creative quality assessment of a text adventure map.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      approved: {
+        type: 'boolean',
+        description: 'True if the map is creatively solid and ready to ship as-is. False if it needs revision.',
+      },
+      feedback: {
+        type: 'string',
+        description: 'If approved, a brief note on what works well. If not approved, specific and actionable feedback on what to improve.',
+      },
+    },
+    required: ['approved', 'feedback'],
+  },
+};
+
+module.exports = { mapToolSchema, critiqueToolSchema };

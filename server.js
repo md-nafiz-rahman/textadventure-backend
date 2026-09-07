@@ -5,7 +5,7 @@ const cors = require('cors');
 const AnthropicModule = require('@anthropic-ai/sdk');
 const Anthropic = typeof AnthropicModule === 'function' ? AnthropicModule : AnthropicModule.default;
 
-const { mapToolSchema } = require('./mapSchema');
+const { mapToolSchema, critiqueToolSchema } = require('./mapSchema');
 const { validateMap } = require('./validateMap');
 
 const BLOCKED_TERMS = [
@@ -53,6 +53,18 @@ Rules you must follow:
 
 Call the generate_map tool with the complete structure.`;
 
+const CRITIC_SYSTEM_PROMPT = `You are an experienced game design critic reviewing a procedurally generated text adventure map for creative quality. The map has ALREADY been verified as structurally valid and fully solvable — do not comment on structural issues like unreachable rooms or missing items; that has been handled separately.
+
+Your job is to judge purely CREATIVE quality:
+- Does the theme feel consistent and vivid across every room, item, and enemy, rather than generic or repetitive?
+- Is the difficulty and puzzle design fair — clues that are neither too obvious nor too obscure?
+- Is there a reasonable variety of room descriptions, items, and challenges, rather than repeated phrasing or ideas?
+- Does the overall structure feel like a satisfying short adventure rather than tedious busywork or an anticlimactic rush to the end?
+
+Be a constructive but genuinely critical reviewer — do not approve mediocre or generic content just to be agreeable. If you request changes, be specific enough that a revision could directly act on your feedback. Only reject for real, meaningful issues — do not nitpick minor stylistic preferences.
+
+Call the submit_critique tool with your assessment.`;
+
 function buildUserPrompt(description) {
   if (description && description.trim() !== '') {
     return `Generate a text adventure map based on this description: "${description.trim()}"`;
@@ -62,9 +74,50 @@ function buildUserPrompt(description) {
 
 const MAX_ATTEMPTS = 5;
 
+async function critiqueMap(map, description) {
+  const requestContext = description && description.trim() !== ''
+    ? `The player requested: "${description.trim()}"`
+    : 'The player requested a random, surprising map with no specific theme given.';
+
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 2000,
+    system: CRITIC_SYSTEM_PROMPT,
+    tools: [critiqueToolSchema],
+    tool_choice: { type: 'tool', name: 'submit_critique' },
+    messages: [
+      {
+        role: 'user',
+        content: `${requestContext}\n\nHere is the generated map to review:\n\n${JSON.stringify(map, null, 2)}`,
+      },
+    ],
+  });
+
+  const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+  if (!toolUseBlock) {
+    return { approved: true, feedback: 'Critic could not be reached; defaulting to approval.' };
+  }
+
+  return toolUseBlock.input;
+}
+
+function buildCritiqueCorrectionMessage(feedback, rejectionCount) {
+  if (rejectionCount < 2) {
+    return `This map is structurally valid, but a game design reviewer gave this feedback:\n${feedback}\n\nCall generate_map again with a revised version that addresses this feedback, while keeping the map fully structurally valid (every room reachable, every lock has a real way to open it, every referenced item actually placed in the map).`;
+  }
+
+  return `This exact category of issue has now been flagged ${rejectionCount} times in a row without being properly fixed. This time, make ONLY the smallest possible targeted change needed to directly satisfy the specific feedback below — do not rewrite, rename, or alter anything else in the map that isn't strictly necessary to fix this issue.
+
+Feedback: ${feedback}
+
+Be precise: if the feedback names a specific exit, item, or field that needs to change, change exactly that and nothing else. Keep the map fully structurally valid (every room reachable, every lock has a real way to open it, every referenced item actually placed in the map).`;
+}
+
 async function generateValidMap(description) {
   const messages = [{ role: 'user', content: buildUserPrompt(description) }];
   let lastErrors = [];
+  let lastValidCandidate = null;
+  let critiqueRejectionCount = 0;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const response = await anthropic.messages.create({
@@ -84,27 +137,60 @@ async function generateValidMap(description) {
     const candidate = toolUseBlock.input;
     const { valid, errors } = validateMap(candidate);
 
-    if (valid) {
+    if (!valid) {
+      console.log(`Attempt ${attempt} failed structural validation:`, errors);
+      console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
+      lastErrors = errors;
+
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: `This map is invalid for the following reasons:\n${errors.map((e) => `- ${e}`).join('\n')}\n\nCall generate_map again with a corrected version that fixes these specific issues. Keep everything else about the map the same where possible.`,
+            is_error: true,
+          },
+        ],
+      });
+      continue;
+    }
+
+    lastValidCandidate = candidate;
+    console.log(`Attempt ${attempt} passed structural validation. Requesting creative critique...`);
+
+    const critique = await critiqueMap(candidate, description);
+    console.log(`Attempt ${attempt} critique:`, critique);
+
+    if (critique.approved) {
       return candidate;
     }
 
-    console.log(`Attempt ${attempt} failed validation:`, errors);
-    console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
-    lastErrors = errors;
+    critiqueRejectionCount += 1;
+    lastErrors = [`Creative feedback: ${critique.feedback}`];
+
+    if (critiqueRejectionCount >= 2) {
+      console.log(`Attempt ${attempt}: same creative issue persisting (rejection #${critiqueRejectionCount}), escalating to a more directive correction instruction.`);
+    }
 
     messages.push({ role: 'assistant', content: response.content });
-
     messages.push({
       role: 'user',
       content: [
         {
           type: 'tool_result',
           tool_use_id: toolUseBlock.id,
-          content: `This map is invalid for the following reasons:\n${errors.map((e) => `- ${e}`).join('\n')}\n\nCall generate_map again with a corrected version that fixes these specific issues. Keep everything else about the map the same where possible.`,
-          is_error: true,
+          content: buildCritiqueCorrectionMessage(critique.feedback, critiqueRejectionCount),
+          is_error: false,
         },
       ],
     });
+  }
+
+  if (lastValidCandidate) {
+    console.log('Exhausted attempts; returning last structurally valid candidate despite pending creative feedback.');
+    return lastValidCandidate;
   }
 
   const error = new Error('Could not generate a valid map after multiple attempts.');
