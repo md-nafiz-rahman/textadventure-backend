@@ -5,7 +5,7 @@ const cors = require('cors');
 const AnthropicModule = require('@anthropic-ai/sdk');
 const Anthropic = typeof AnthropicModule === 'function' ? AnthropicModule : AnthropicModule.default;
 
-const { mapToolSchema, critiqueToolSchema } = require('./mapSchema');
+const { mapToolSchema, critiqueToolSchema, answerCheckToolSchema } = require('./mapSchema');
 const { validateMap } = require('./validateMap');
 
 const BLOCKED_TERMS = [
@@ -52,6 +52,18 @@ Rules you must follow:
 9. Write vivid but concise descriptions (1-3 sentences) matching the requested theme.
 
 Call the generate_map tool with the complete structure.`;
+
+const ANSWER_CHECK_SYSTEM_PROMPT = `You are checking whether a player's guess for a riddle is a genuine, correct answer — not a coincidental similarity.
+
+You will be given the riddle's official answer and the player's guess. Respond with whether the guess should be accepted, considering:
+- Exact synonyms (e.g. official answer "book", guess "novel" is NOT the same thing and should be rejected — but "book" vs "a book" should be accepted)
+- Minor spelling mistakes or typos
+- The same concept phrased differently (e.g. "flashlight" vs "torch" if genuinely interchangeable)
+- Singular/plural differences, articles ("a", "the"), or filler words
+
+Be STRICT, not generous. If there is real doubt about whether the guess means the same specific thing as the official answer, reject it. A wrong guess that happens to be topically related must still be rejected.
+
+Call the submit_answer_check tool with your decision.`;
 
 const CRITIC_SYSTEM_PROMPT = `You are an experienced game design critic reviewing a procedurally generated text adventure map for creative quality. The map has ALREADY been verified as structurally valid and fully solvable — do not comment on structural issues like unreachable rooms or missing items; that has been handled separately.
 
@@ -238,6 +250,30 @@ async function getFlavorText({ command, roomDescription, itemNames, enemyName, h
   return textBlock ? textBlock.text.trim() : null;
 }
 
+async function checkAnswerSemantically(officialAnswer, playerGuess) {
+  const response = await anthropic.messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 200,
+    thinking: { type: 'disabled' },
+    system: ANSWER_CHECK_SYSTEM_PROMPT,
+    tools: [answerCheckToolSchema],
+    tool_choice: { type: 'tool', name: 'submit_answer_check' },
+    messages: [
+      {
+        role: 'user',
+        content: `Official answer: "${officialAnswer}"\nPlayer's guess: "${playerGuess}"`,
+      },
+    ],
+  });
+
+  const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+  if (!toolUseBlock) {
+    return false;
+  }
+
+  return !!toolUseBlock.input.correct;
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'TextAdventureGame backend is running' });
 });
@@ -290,6 +326,22 @@ app.post('/flavor', async (req, res) => {
   } catch (error) {
     console.error('Error in /flavor:', error);
     res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
+app.post('/check-answer', async (req, res) => {
+  try {
+    const { officialAnswer, guess } = req.body;
+
+    if (!officialAnswer || !guess) {
+      return res.status(400).json({ error: 'Missing required fields.' });
+    }
+
+    const correct = await checkAnswerSemantically(officialAnswer, guess);
+    res.json({ correct });
+  } catch (error) {
+    console.error('Error in /check-answer:', error);
+    res.json({ correct: false });
   }
 });
 

@@ -119,4 +119,19 @@ const critiqueToolSchema = {
   },
 };
 
-module.exports = { mapToolSchema, critiqueToolSchema };
+const answerCheckToolSchema = {
+  name: 'submit_answer_check',
+  description: 'Submit a judgment on whether a player\'s guess matches the correct riddle answer.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      correct: {
+        type: 'boolean',
+        description: 'True only if the guess genuinely means the same specific thing as the official answer.',
+      },
+    },
+    required: ['correct'],
+  },
+};
+
+module.exports = { mapToolSchema, critiqueToolSchema, answerCheckToolSchema };
