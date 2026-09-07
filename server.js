@@ -60,28 +60,56 @@ function buildUserPrompt(description) {
   return 'Generate a random, creative text adventure map. Surprise the player with an interesting theme.';
 }
 
-async function generateMapAttempt(description, previousErrors) {
-  let userPrompt = buildUserPrompt(description);
+const MAX_ATTEMPTS = 5;
 
-  if (previousErrors && previousErrors.length > 0) {
-    userPrompt += `\n\nYour previous attempt had these problems, please fix them:\n${previousErrors.map((e) => `- ${e}`).join('\n')}`;
+async function generateValidMap(description) {
+  const messages = [{ role: 'user', content: buildUserPrompt(description) }];
+  let lastErrors = [];
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 20000,
+      system: SYSTEM_PROMPT,
+      tools: [mapToolSchema],
+      tool_choice: { type: 'tool', name: 'generate_map' },
+      messages,
+    });
+
+    const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+    if (!toolUseBlock) {
+      throw new Error('Model did not return a structured map.');
+    }
+
+    const candidate = toolUseBlock.input;
+    const { valid, errors } = validateMap(candidate);
+
+    if (valid) {
+      return candidate;
+    }
+
+    console.log(`Attempt ${attempt} failed validation:`, errors);
+    console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
+    lastErrors = errors;
+
+    messages.push({ role: 'assistant', content: response.content });
+
+    messages.push({
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: toolUseBlock.id,
+          content: `This map is invalid for the following reasons:\n${errors.map((e) => `- ${e}`).join('\n')}\n\nCall generate_map again with a corrected version that fixes these specific issues. Keep everything else about the map the same where possible.`,
+          is_error: true,
+        },
+      ],
+    });
   }
 
-  const message = await anthropic.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 20000,
-    system: SYSTEM_PROMPT,
-    tools: [mapToolSchema],
-    tool_choice: { type: 'tool', name: 'generate_map' },
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-
-  const toolUseBlock = message.content.find((block) => block.type === 'tool_use');
-  if (!toolUseBlock) {
-    throw new Error('Model did not return a structured map.');
-  }
-
-  return toolUseBlock.input;
+  const error = new Error('Could not generate a valid map after multiple attempts.');
+  error.details = lastErrors;
+  throw error;
 }
 
 app.get('/health', (req, res) => {
@@ -93,32 +121,16 @@ app.post('/generate', async (req, res) => {
     const { description } = req.body;
 
     if (containsBlockedContent(description)) {
-        return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });    }
-
-    const MAX_ATTEMPTS = 5;
-    let lastErrors = [];
-    let generatedMap = null;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const candidate = await generateMapAttempt(description, lastErrors);
-      const { valid, errors } = validateMap(candidate);
-
-      if (valid) {
-        generatedMap = candidate;
-        break;
-      }
-      console.log(`Attempt ${attempt} failed validation:`, errors);
-      console.log(`Attempt ${attempt} raw output:`, JSON.stringify(candidate));
-        lastErrors = errors;
+      return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });
     }
 
-    if (!generatedMap) {
-      return res.status(500).json({ error: 'Could not generate a valid map after multiple attempts.', details: lastErrors });
-    }
-
+    const generatedMap = await generateValidMap(description);
     res.json({ map: generatedMap });
   } catch (error) {
     console.error('Error in /generate:', error);
+    if (error.details) {
+      return res.status(500).json({ error: error.message, details: error.details });
+    }
     res.status(500).json({ error: 'Something went wrong generating the map.' });
   }
 });
@@ -126,5 +138,4 @@ app.post('/generate', async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-
 });
