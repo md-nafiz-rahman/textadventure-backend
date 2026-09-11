@@ -61,25 +61,23 @@ function validateMap(map) {
     }
   });
 
-  const revealedIds = new Set();
+  const revealTargets = new Set();
   rooms.forEach((r) => {
-    if (r.puzzle?.onSolve?.revealsItemId) revealedIds.add(r.puzzle.onSolve.revealsItemId);
-    if (r.enemy?.onDefeat?.revealsItemId) revealedIds.add(r.enemy.onDefeat.revealsItemId);
+    if (r.puzzle?.onSolve?.revealsItemId) revealTargets.add(r.puzzle.onSolve.revealsItemId);
+    if (r.enemy?.onDefeat?.revealsItemId) revealTargets.add(r.enemy.onDefeat.revealsItemId);
   });
 
   rooms.forEach((room) => {
     (room.items || []).forEach((item) => {
-      if (item.hidden && !revealedIds.has(item.id)) {
+      if (item.hidden && !revealTargets.has(item.id)) {
         errors.push(`Item "${item.id}" in room "${room.id}" is marked hidden but nothing in the map ever reveals it.`);
       }
     });
   });
 
-  // Simulate actually playing the map: only count a room/item/enemy as
-  // genuinely reachable/obtainable if it's actually possible to get there
-  // given locked doors, required items, and puzzle/enemy dependencies.
   const reachableRooms = new Set(roomIds.has(startRoomId) ? [startRoomId] : []);
   const obtainedItems = new Set();
+  const revealedItemIds = new Set();
   const solvedPuzzles = new Set();
   const defeatedEnemies = new Set();
 
@@ -92,7 +90,8 @@ function validateMap(map) {
       if (!room) continue;
 
       (room.items || []).forEach((item) => {
-        if (!item.hidden && !obtainedItems.has(item.id)) {
+        const visible = !item.hidden || revealedItemIds.has(item.id);
+        if (visible && !obtainedItems.has(item.id)) {
           obtainedItems.add(item.id);
           changed = true;
         }
@@ -102,8 +101,8 @@ function validateMap(map) {
         solvedPuzzles.add(room.puzzle.id);
         changed = true;
         const revealed = room.puzzle.onSolve?.revealsItemId;
-        if (revealed && allItemIds.has(revealed) && !obtainedItems.has(revealed)) {
-          obtainedItems.add(revealed);
+        if (revealed && allItemIds.has(revealed) && !revealedItemIds.has(revealed)) {
+          revealedItemIds.add(revealed);
         }
       }
 
@@ -113,8 +112,8 @@ function validateMap(map) {
           defeatedEnemies.add(room.enemy.id);
           changed = true;
           const revealed = room.enemy.onDefeat?.revealsItemId;
-          if (revealed && allItemIds.has(revealed) && !obtainedItems.has(revealed)) {
-            obtainedItems.add(revealed);
+          if (revealed && allItemIds.has(revealed) && !revealedItemIds.has(revealed)) {
+            revealedItemIds.add(revealed);
           }
         }
       }

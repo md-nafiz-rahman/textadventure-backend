@@ -30,7 +30,7 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM_PROMPT = `Keep all content strictly family-friendly. Never generate sexual, explicit, or adult content of any kind. If the user's description implies anything inappropriate, ignore that part entirely and invent a wholesome, unrelated theme instead.
+const BASE_SYSTEM_PROMPT = `Keep all content strictly family-friendly. Never generate sexual, explicit, or adult content of any kind. If the user's description implies anything inappropriate, ignore that part entirely and invent a wholesome, unrelated theme instead.
 
 IMPORTANT: Generate the title, startRoomId, and objective fields FIRST, before writing out the detailed rooms array. These identifying fields must never be lost, even in a long, detailed generation.
 
@@ -54,6 +54,27 @@ Rules you must follow:
 9. Write vivid but concise descriptions (1-3 sentences) matching the requested theme.
 
 Call the generate_map tool with the complete structure.`;
+
+const LANGUAGE_DIFFICULTY_INSTRUCTIONS = {
+  simple: `\n\nLANGUAGE STYLE — SIMPLE: Use short sentences and common, everyday words in every piece of text (room descriptions, item descriptions, puzzle prompts, hints, messages). Avoid complex vocabulary, idioms, and literary flourishes. Write for someone who wants an easy, quick reading experience.`,
+  rich: `\n\nLANGUAGE STYLE — RICH: Use vivid, literary language in every piece of text (room descriptions, item descriptions, puzzle prompts, hints, messages). Sophisticated vocabulary, evocative imagery, and varied sentence structure are encouraged. Write for someone who wants an immersive, atmospheric reading experience.`,
+};
+
+const NO_RIDDLES_INSTRUCTION = `\n\nIMPORTANT: Do NOT include a puzzle on any room. The player has opted out of riddles entirely. Progression must rely only on enemies and locked doors requiring items — never a riddle the player has to solve.`;
+
+function buildSystemPrompt(languageDifficulty, includeRiddles) {
+  let prompt = BASE_SYSTEM_PROMPT;
+
+  if (languageDifficulty && LANGUAGE_DIFFICULTY_INSTRUCTIONS[languageDifficulty]) {
+    prompt += LANGUAGE_DIFFICULTY_INSTRUCTIONS[languageDifficulty];
+  }
+
+  if (includeRiddles === false) {
+    prompt += NO_RIDDLES_INSTRUCTION;
+  }
+
+  return prompt;
+}
 
 const ANSWER_CHECK_SYSTEM_PROMPT = `You are checking whether a player's guess for a riddle is a genuine, correct answer — not a coincidental similarity.
 
@@ -80,6 +101,10 @@ Your job is to judge purely CREATIVE quality:
 
 Be a constructive but genuinely critical reviewer — do not approve mediocre or generic content just to be agreeable. If you request changes, be specific enough that a revision could directly act on your feedback. Only reject for real, meaningful issues — do not nitpick minor stylistic preferences.
 
+IMPORTANT: Explicitly trace whether every enemy, and every room containing a required item, is actually mandatory to reach the objective — not just "technically present." Check every room's exits for alternate, unlocked paths that might bypass content you'd otherwise assume is required. If a significant piece of content (an entire enemy encounter, a whole room branch) turns out to be fully skippable due to an unlocked shortcut elsewhere, treat this as a real pacing flaw worth rejecting, even if the map is technically completable.
+
+IMPORTANT: The player may have specifically requested certain settings for this map (noted below, if any). Never criticize the map for following a setting the player deliberately chose — that is intentional, not a flaw.
+
 Call the submit_critique tool with your assessment.`;
 
 const FLAVOR_SYSTEM_PROMPT = `You are narrating atmospheric flavor text for a text adventure game. The player just typed something that isn't a recognized game command (like "go", "take", "fight").
@@ -101,9 +126,24 @@ function buildUserPrompt(description) {
   return 'Generate a random, creative text adventure map. Surprise the player with an interesting theme.';
 }
 
+function buildCritiqueSettingsNote(languageDifficulty, includeRiddles) {
+  const notes = [];
+
+  if (languageDifficulty === 'simple') {
+    notes.push('The player requested SIMPLE language. Plain, easy wording is intentional — do not mark this down.');
+  } else if (languageDifficulty === 'rich') {
+    notes.push('The player requested RICH language. Elaborate, literary prose is intentional — do not mark this down.');
+  }
+
+  if (includeRiddles === false) {
+    notes.push('The player opted OUT of puzzles/riddles entirely. A map with no puzzles is intentional — judge pacing and challenge using only exploration and combat, and do not criticize the lack of riddle variety.');
+  }
+
+  return notes.length > 0 ? `\n\nPlayer-chosen settings for this map:\n${notes.map((n) => `- ${n}`).join('\n')}` : '';
+}
+
 const MAX_ATTEMPTS = 5;
 
-// ---- In-memory job store for background generation with live progress ----
 const jobs = new Map();
 const JOB_TTL_MS = 15 * 60 * 1000;
 
@@ -135,10 +175,12 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-async function critiqueMap(map, description) {
+async function critiqueMap(map, description, languageDifficulty, includeRiddles) {
   const requestContext = description && description.trim() !== ''
     ? `The player requested: "${description.trim()}"`
     : 'The player requested a random, surprising map with no specific theme given.';
+
+  const settingsNote = buildCritiqueSettingsNote(languageDifficulty, includeRiddles);
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-5',
@@ -149,7 +191,7 @@ async function critiqueMap(map, description) {
     messages: [
       {
         role: 'user',
-        content: `${requestContext}\n\nHere is the generated map to review:\n\n${JSON.stringify(map, null, 2)}`,
+        content: `${requestContext}${settingsNote}\n\nHere is the generated map to review:\n\n${JSON.stringify(map, null, 2)}`,
       },
     ],
   });
@@ -174,7 +216,8 @@ Feedback: ${feedback}
 Be precise: if the feedback names a specific exit, item, or field that needs to change, change exactly that and nothing else. Keep the map fully structurally valid (every room reachable, every lock has a real way to open it, every referenced item actually placed in the map).`;
 }
 
-async function generateValidMap(description, onProgress = () => {}) {
+async function generateValidMap(description, languageDifficulty, includeRiddles, onProgress = () => {}) {
+  const systemPrompt = buildSystemPrompt(languageDifficulty, includeRiddles);
   const messages = [{ role: 'user', content: buildUserPrompt(description) }];
   let lastErrors = [];
   let lastValidCandidate = null;
@@ -190,7 +233,7 @@ async function generateValidMap(description, onProgress = () => {}) {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-5',
       max_tokens: 20000,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       tools: [mapToolSchema],
       tool_choice: { type: 'tool', name: 'generate_map' },
       messages,
@@ -232,7 +275,7 @@ async function generateValidMap(description, onProgress = () => {}) {
     onProgress('Reviewing puzzle design and pacing...');
     console.log(`Attempt ${attempt} passed structural validation. Requesting creative critique...`);
 
-    const critique = await critiqueMap(candidate, description);
+    const critique = await critiqueMap(candidate, description, languageDifficulty, includeRiddles);
     console.log(`Attempt ${attempt} critique:`, critique);
 
     if (critique.approved) {
@@ -330,16 +373,21 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/generate/start', (req, res) => {
-  const { description } = req.body;
+  const { description, languageDifficulty, includeRiddles } = req.body;
 
   if (containsBlockedContent(description)) {
     return res.status(400).json({ error: 'Please use a family-friendly description and try again.' });
   }
 
+  const validDifficulty = ['simple', 'standard', 'rich'].includes(languageDifficulty)
+    ? languageDifficulty
+    : 'standard';
+  const resolvedIncludeRiddles = includeRiddles === false ? false : true;
+
   const jobId = createJob();
   res.json({ jobId });
 
-  generateValidMap(description, (status) => {
+  generateValidMap(description, validDifficulty, resolvedIncludeRiddles, (status) => {
     updateJob(jobId, { status });
   })
     .then((map) => {
