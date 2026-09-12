@@ -52,6 +52,10 @@ Rules you must follow:
 7. The objective's target must reference real ids that exist and are achievable given the layout.
 8. Keep ids short, unique, lowercase with underscores (e.g. "rusty_sword", "guard_dog").
 9. Write vivid but concise descriptions (1-3 sentences) matching the requested theme.
+10. Never place an item, or write flavor text implying an item, that isn't actually required by some real lock, puzzle, or enemy — unless it is clearly and only atmospheric flavor with no implied function. A "key" or "card" description must correspond to a door or lock that genuinely exists.
+11. Before finalizing, mentally trace the full path from the start room to the objective. Verify every enemy and every locked room along that path is genuinely unavoidable — check every room's other exits for an unlocked shortcut that would let a player bypass an enemy or a branch you intended to be mandatory. If a room or exit is meant to be optional, that's fine; if it was meant to be required, make sure no unlocked alternate path defeats that.
+12. Every enemy's weakness (defeatedByAnyOf) should make clear thematic sense (e.g. a light-based tool against a light-averse creature, a tool that would plausibly disrupt machinery against a robot). Avoid arbitrary or unintuitive item-enemy pairings chosen only to create a requirement.
+13. Vary room descriptions with genuinely distinct sensory details rather than repeating similar phrasing or structure room to room. If puzzles are disabled and combat carries the challenge, escalate difficulty and vary how encounters are described and resolved, rather than making them feel identical.
 
 Call the generate_map tool with the complete structure.`;
 
