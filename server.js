@@ -30,6 +30,14 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const REASONING_MODEL = 'claude-sonnet-5';
+const FAST_MODEL = 'claude-haiku-4-5-20251001';
+
+function logTiming(label, model, startedAt) {
+  const ms = Date.now() - startedAt;
+  console.log(`[timing] ${label} (${model}) took ${ms}ms`);
+}
+
 const BASE_SYSTEM_PROMPT = `Keep all content strictly family-friendly. Never generate sexual, explicit, or adult content of any kind. If the user's description implies anything inappropriate, ignore that part entirely and invent a wholesome, unrelated theme instead.
 
 IMPORTANT: Generate the title, startRoomId, and objective fields FIRST, before writing out the detailed rooms array. These identifying fields must never be lost, even in a long, detailed generation.
@@ -186,8 +194,9 @@ async function critiqueMap(map, description, languageDifficulty, includeRiddles)
 
   const settingsNote = buildCritiqueSettingsNote(languageDifficulty, includeRiddles);
 
+  const startedAt = Date.now();
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-5',
+    model: REASONING_MODEL,
     max_tokens: 2000,
     system: CRITIC_SYSTEM_PROMPT,
     tools: [critiqueToolSchema],
@@ -199,6 +208,7 @@ async function critiqueMap(map, description, languageDifficulty, includeRiddles)
       },
     ],
   });
+  logTiming('critique', REASONING_MODEL, startedAt);
 
   const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
   if (!toolUseBlock) {
@@ -234,14 +244,16 @@ async function generateValidMap(description, languageDifficulty, includeRiddles,
         : `Revising the world (attempt ${attempt} of ${MAX_ATTEMPTS})...`
     );
 
+    const startedAt = Date.now();
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-5',
+      model: REASONING_MODEL,
       max_tokens: 20000,
       system: systemPrompt,
       tools: [mapToolSchema],
       tool_choice: { type: 'tool', name: 'generate_map' },
       messages,
     });
+    logTiming(`generation attempt ${attempt}`, REASONING_MODEL, startedAt);
 
     const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
     if (!toolUseBlock) {
@@ -336,21 +348,24 @@ async function getFlavorText({ command, roomDescription, itemNames, enemyName, h
   }
   contextLines.push(`The player typed: "${command}"`);
 
+  const startedAt = Date.now();
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-5',
+    model: FAST_MODEL,
     max_tokens: 300,
     thinking: { type: 'disabled' },
     system: FLAVOR_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: contextLines.join('\n') }],
   });
+  logTiming('flavor', FAST_MODEL, startedAt);
 
   const textBlock = response.content.find((block) => block.type === 'text');
   return textBlock ? textBlock.text.trim() : null;
 }
 
 async function checkAnswerSemantically(officialAnswer, playerGuess) {
+  const startedAt = Date.now();
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-5',
+    model: FAST_MODEL,
     max_tokens: 200,
     thinking: { type: 'disabled' },
     system: ANSWER_CHECK_SYSTEM_PROMPT,
@@ -363,6 +378,7 @@ async function checkAnswerSemantically(officialAnswer, playerGuess) {
       },
     ],
   });
+  logTiming('answer-check', FAST_MODEL, startedAt);
 
   const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
   if (!toolUseBlock) {
