@@ -134,4 +134,28 @@ const answerCheckToolSchema = {
   },
 };
 
-module.exports = { mapToolSchema, critiqueToolSchema, answerCheckToolSchema };
+const intentDetectionToolSchema = {
+  name: 'submit_intent_detection',
+  description: 'Submit a judgment on whether the player\'s freeform text was a rephrased attempt at a known game command.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      isGameAction: {
+        type: 'boolean',
+        description: 'True only if you are confident the player was clearly attempting one of the known game commands, using a target explicitly listed as available in the context given to you.',
+      },
+      verb: {
+        type: 'string',
+        enum: ['look', 'go', 'take', 'inventory', 'examine', 'solve', 'hint', 'fight', 'save', 'help'],
+        description: 'The real game command the player was attempting. Only meaningful if isGameAction is true.',
+      },
+      argument: {
+        type: 'string',
+        description: 'The specific target for the command — a direction, an item name, an enemy name, or the player\'s puzzle answer content. Use an empty string for commands that need no argument (look, inventory, hint, save, help).',
+      },
+    },
+    required: ['isGameAction', 'verb', 'argument'],
+  },
+};
+
+module.exports = { mapToolSchema, critiqueToolSchema, answerCheckToolSchema, intentDetectionToolSchema };

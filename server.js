@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const AnthropicModule = require('@anthropic-ai/sdk');
 const Anthropic = typeof AnthropicModule === 'function' ? AnthropicModule : AnthropicModule.default;
 
-const { mapToolSchema, critiqueToolSchema, answerCheckToolSchema } = require('./mapSchema');
+const { mapToolSchema, critiqueToolSchema, answerCheckToolSchema, intentDetectionToolSchema } = require('./mapSchema');
 const { validateMap } = require('./validateMap');
 
 const BLOCKED_TERMS = [
@@ -64,7 +64,7 @@ Rules you must follow:
 11. Before finalizing, mentally trace the full path from the start room to the objective. Verify every enemy and every locked room along that path is genuinely unavoidable — check every room's other exits for an unlocked shortcut that would let a player bypass an enemy or a branch you intended to be mandatory. If a room or exit is meant to be optional, that's fine; if it was meant to be required, make sure no unlocked alternate path defeats that.
 12. Every enemy's weakness (defeatedByAnyOf) should make clear thematic sense (e.g. a light-based tool against a light-averse creature, a tool that would plausibly disrupt machinery against a robot). Avoid arbitrary or unintuitive item-enemy pairings chosen only to create a requirement.
 13. Vary room descriptions with genuinely distinct sensory details rather than repeating similar phrasing or structure room to room. If puzzles are disabled and combat carries the challenge, escalate difficulty and vary how encounters are described and resolved, rather than making them feel identical.
-
+14. Be especially careful with rooms reachable from more than one direction (e.g. two separate branches both leading to the same later room). If two branches converge on the same room, and only ONE of those branches was meant to gate mandatory content, the other branch creates an unintended bypass. Either ensure both convergent paths require passing through their own mandatory content, or make only one path exist to that room at all.
 Call the generate_map tool with the complete structure.`;
 
 const LANGUAGE_DIFFICULTY_INSTRUCTIONS = {
@@ -130,6 +130,26 @@ Strict rules:
 - If the command is nonsensical or unrelated to the scene, respond with a brief, mildly humorous acknowledgment that nothing happens, still matching the game's tone.
 
 Keep your entire response to 1-2 sentences, no more.`;
+
+const INTENT_DETECTION_SYSTEM_PROMPT = `You are interpreting a text adventure game player's freeform input to see if it was a rephrased attempt at one of the game's real commands, rather than something unrelated.
+
+The real commands are:
+- look — look around the room (no argument)
+- go — move in a direction (argument: the direction, must be one of the directions explicitly listed as available below)
+- take — pick up an item (argument: the item name, must be one of the items explicitly listed as visible below)
+- inventory — check what the player is carrying (no argument)
+- examine — look closely at an item or the enemy (argument: the item or enemy name, must match something explicitly listed below)
+- solve — attempt to answer the puzzle in this room (argument: the player's actual guess/answer content, extracted from their sentence)
+- hint — ask for a hint on the current puzzle (no argument)
+- fight — attempt to defeat the enemy present (argument: the enemy name, must match the enemy explicitly listed below, if any)
+- save — save the game (no argument)
+- help — list available commands (no argument)
+
+Only set isGameAction to true if the player's text is CLEARLY and CONFIDENTLY attempting one of these actions using a target that was explicitly given to you in the context below. Never invent a direction, item, or enemy name that wasn't explicitly listed. If the text is ambiguous, unrelated, creative roleplay unrelated to these actions (e.g. "dance", "sing a song"), or targets something not in the provided context, set isGameAction to false.
+
+Be conservative — a false "yes" is worse than a false "no", since a false "no" simply falls back to atmospheric flavor text, while a false "yes" could incorrectly perform a real game action.
+
+Call the submit_intent_detection tool with your decision.`;
 
 function buildUserPrompt(description) {
   if (description && description.trim() !== '') {
@@ -388,6 +408,40 @@ async function checkAnswerSemantically(officialAnswer, playerGuess) {
   return !!toolUseBlock.input.correct;
 }
 
+async function detectIntent({ command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle }) {
+  const contextLines = [
+    `Current room: ${roomDescription}`,
+    `Available exit directions: ${availableDirections.length > 0 ? availableDirections.join(', ') : 'none'}`,
+    `Visible, takeable items here: ${itemNames.length > 0 ? itemNames.join(', ') : 'none'}`,
+  ];
+  if (enemyName) {
+    contextLines.push(`An enemy is present: ${enemyName}`);
+  }
+  if (hasPuzzle) {
+    contextLines.push('There is an unsolved puzzle in this room.');
+  }
+  contextLines.push(`The player typed: "${command}"`);
+
+  const startedAt = Date.now();
+  const response = await anthropic.messages.create({
+    model: FAST_MODEL,
+    max_tokens: 300,
+    thinking: { type: 'disabled' },
+    system: INTENT_DETECTION_SYSTEM_PROMPT,
+    tools: [intentDetectionToolSchema],
+    tool_choice: { type: 'tool', name: 'submit_intent_detection' },
+    messages: [{ role: 'user', content: contextLines.join('\n') }],
+  });
+  logTiming('intent-detection', FAST_MODEL, startedAt);
+
+  const toolUseBlock = response.content.find((block) => block.type === 'tool_use');
+  if (!toolUseBlock) {
+    return { isGameAction: false, verb: null, argument: '' };
+  }
+
+  return toolUseBlock.input;
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'TextAdventureGame backend is running' });
 });
@@ -475,6 +529,34 @@ app.post('/check-answer', async (req, res) => {
   } catch (error) {
     console.error('Error in /check-answer:', error);
     res.json({ correct: false });
+  }
+});
+
+app.post('/detect-intent', async (req, res) => {
+  try {
+    const { command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle } = req.body;
+
+    if (!command || !roomDescription) {
+      return res.status(400).json({ error: 'Missing required context.' });
+    }
+
+    if (containsBlockedContent(command)) {
+      return res.json({ isGameAction: false });
+    }
+
+    const result = await detectIntent({
+      command,
+      roomDescription,
+      availableDirections: availableDirections || [],
+      itemNames: itemNames || [],
+      enemyName: enemyName || null,
+      hasPuzzle: !!hasPuzzle,
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error in /detect-intent:', error);
+    res.json({ isGameAction: false });
   }
 });
 
