@@ -147,6 +147,10 @@ The real commands are:
 
 Only set isGameAction to true if the player's text is CLEARLY and CONFIDENTLY attempting one of these actions using a target that was explicitly given to you in the context below. Never invent a direction, item, or enemy name that wasn't explicitly listed. If the text is ambiguous, unrelated, creative roleplay unrelated to these actions (e.g. "dance", "sing a song"), or targets something not in the provided context, set isGameAction to false.
 
+IMPORTANT: Only ever classify input as "solve" or "hint" if the context below EXPLICITLY states that an unsolved puzzle exists in this room right now. If no puzzle is mentioned in the context, isGameAction must be false, even if the player's wording superficially resembles a plausible riddle answer. Never assume or infer that a puzzle exists — only act on what is explicitly stated below.
+
+If a puzzle's real answer is given to you below, you may use it ONLY to help recognise that the player's bare input is a genuine attempt at that answer (e.g. if the answer is "keyboard" and the player just typed "keyboard", classify this as a solve attempt with argument "keyboard"). This is for recognition only — you are NEVER judging whether the answer is correct (a separate system does that), and you must NEVER mention, repeat, confirm, or hint at the answer in any way. Your only output is the structured tool call itself.
+
 Be conservative — a false "yes" is worse than a false "no", since a false "no" simply falls back to atmospheric flavor text, while a false "yes" could incorrectly perform a real game action.
 
 Call the submit_intent_detection tool with your decision.`;
@@ -423,7 +427,7 @@ async function checkAnswerSemantically(officialAnswer, playerGuess) {
   return !!toolUseBlock.input.correct;
 }
 
-async function detectIntent({ command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle }) {
+async function detectIntent({ command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle, puzzleAnswer }) {
   const contextLines = [
     `Current room: ${roomDescription}`,
     `Available exit directions: ${availableDirections.length > 0 ? availableDirections.join(', ') : 'none'}`,
@@ -434,6 +438,9 @@ async function detectIntent({ command, roomDescription, availableDirections, ite
   }
   if (hasPuzzle) {
     contextLines.push('There is an unsolved puzzle in this room.');
+    if (puzzleAnswer) {
+      contextLines.push(`(For your recognition only, never to be repeated: the puzzle's real answer is "${puzzleAnswer}".)`);
+    }
   }
   contextLines.push(`The player typed: "${command}"`);
 
@@ -575,7 +582,7 @@ app.post('/check-answer', async (req, res) => {
 
 app.post('/detect-intent', async (req, res) => {
   try {
-    const { command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle } = req.body;
+    const { command, roomDescription, availableDirections, itemNames, enemyName, hasPuzzle, puzzleAnswer } = req.body;
 
     if (!command || !roomDescription) {
       return res.status(400).json({ error: 'Missing required context.' });
@@ -592,6 +599,7 @@ app.post('/detect-intent', async (req, res) => {
       itemNames: itemNames || [],
       enemyName: enemyName || null,
       hasPuzzle: !!hasPuzzle,
+      puzzleAnswer: puzzleAnswer || null,
     });
 
     res.json(result);
@@ -600,6 +608,7 @@ app.post('/detect-intent', async (req, res) => {
     res.json({ isGameAction: false });
   }
 });
+
 
 app.post('/ask-narrator', async (req, res) => {
   try {
