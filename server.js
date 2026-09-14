@@ -151,6 +151,21 @@ Be conservative — a false "yes" is worse than a false "no", since a false "no"
 
 Call the submit_intent_detection tool with your decision.`;
 
+const NARRATOR_SYSTEM_PROMPT = `You are the in-world narrator for a text adventure game, answering a player's question about the world they are exploring.
+
+You will be given: the adventure's title, the player's objective, the rooms the player has ACTUALLY VISITED so far (with descriptions, visible items, and enemy/puzzle status), and the player's current inventory.
+
+Answer naturally, in a narrator's voice, grounded ONLY in what has been given to you. Follow these rules strictly:
+
+- NEVER mention, describe, or hint at the contents of any room that was not included in the context given to you. If asked about somewhere the player hasn't been, say something like "you haven't explored there yet" rather than inventing details.
+- NEVER reveal a puzzle's answer, even if asked directly. You may point the player toward the 'hint' command instead.
+- NEVER reveal what specifically defeats an enemy. You may acknowledge that an enemy is present or already defeated, but never explain how to beat it.
+- NEVER confidently state whether a room holds a hidden secret one way or the other unless you are certain from what was given to you — if unsure, stay vague and atmospheric rather than confirming or denying.
+- You MAY freely state the player's overall objective if asked, since this is the stated goal of the adventure, not a secret.
+- If asked something entirely unrelated to the adventure, gently steer the answer back to the game world, in character.
+
+Keep answers conversational and fairly brief, usually 2-4 sentences.`;
+
 function buildUserPrompt(description) {
   if (description && description.trim() !== '') {
     return `Generate a text adventure map based on this description: "${description.trim()}"`;
@@ -442,6 +457,32 @@ async function detectIntent({ command, roomDescription, availableDirections, ite
   return toolUseBlock.input;
 }
 
+async function askNarrator({ question, mapTitle, objectiveText, visitedRoomsText, inventoryText }) {
+  const contextLines = [
+    `Adventure title: ${mapTitle}`,
+    `Player's objective: ${objectiveText}`,
+    `Player's current inventory: ${inventoryText}`,
+    '',
+    'Rooms the player has visited so far:',
+    visitedRoomsText,
+    '',
+    `The player asks: "${question}"`,
+  ];
+
+  const startedAt = Date.now();
+  const response = await anthropic.messages.create({
+    model: FAST_MODEL,
+    max_tokens: 400,
+    thinking: { type: 'disabled' },
+    system: NARRATOR_SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: contextLines.join('\n') }],
+  });
+  logTiming('ask-narrator', FAST_MODEL, startedAt);
+
+  const textBlock = response.content.find((block) => block.type === 'text');
+  return textBlock ? textBlock.text.trim() : null;
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'TextAdventureGame backend is running' });
 });
@@ -557,6 +598,37 @@ app.post('/detect-intent', async (req, res) => {
   } catch (error) {
     console.error('Error in /detect-intent:', error);
     res.json({ isGameAction: false });
+  }
+});
+
+app.post('/ask-narrator', async (req, res) => {
+  try {
+    const { question, mapTitle, objectiveText, visitedRoomsText, inventoryText } = req.body;
+
+    if (!question || !mapTitle) {
+      return res.status(400).json({ error: 'Missing required context.' });
+    }
+
+    if (containsBlockedContent(question)) {
+      return res.json({ text: "That's not something the narrator can help with." });
+    }
+
+    const text = await askNarrator({
+      question,
+      mapTitle,
+      objectiveText: objectiveText || 'Unknown',
+      visitedRoomsText: visitedRoomsText || 'Nothing established yet.',
+      inventoryText: inventoryText || 'Nothing.',
+    });
+
+    if (!text) {
+      return res.status(500).json({ error: 'Could not generate a response.' });
+    }
+
+    res.json({ text });
+  } catch (error) {
+    console.error('Error in /ask-narrator:', error);
+    res.status(500).json({ error: 'Something went wrong.' });
   }
 });
 
